@@ -63,11 +63,11 @@ Sent when task state changes (submitted → working → completed):
 ```
 
 **States:**
-- `submitted` - Task received and queued
-- `working` - Task is being processed
-- `completed` - Task finished successfully
-- `failed` - Task encountered an error
-- `input_required` - Task needs additional input
+- submitted - We've started your request
+- working - Processing your data..
+- awaiting_review - Please verify this high-risk step
+- completed - Your results are ready
+-  failed - Something went wrong; retrying.
 
 ### Artifact Update Event
 
@@ -95,37 +95,65 @@ Sent when artifacts (outputs) are generated:
 ### Basic FastAPI Example
 
 ```python
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
+from typing import Optional
+import datetime
 
 app = FastAPI()
 
+def log_event(task_id: str, message: str):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [Task: {task_id}] {message}")
+
 @app.post("/webhooks/task-updates")
 async def handle_task_update(
-    request: Request,
+    request: Request, 
+    background_tasks: BackgroundTasks,
     authorization: str = Header(None)
 ):
-    # Verify token
-    if authorization != "Bearer your_secret_token_here":
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Parse event
-    event = await request.json()
+# 1. Security Check
+    if authorization != f"Bearer {WEBHOOK_TOKEN}":
+        raise HTTPException(status_code=401, detail="Invalid Token")
 
-    # Handle different event types
-    if event["kind"] == "status-update":
-        task_id = event["task_id"]
-        state = event["status"]["state"]
-        print(f"Task {task_id} is now {state}")
+    payload = await request.json()
+    kind = payload.get("kind")
+    task_id = payload.get("task_id")
 
-        if state == "completed":
-            # Task finished - fetch results
-            pass
+    # 2. Process Status Updates (The Lifecycle)
+    if kind == "status-update":
+        state = payload["status"]["state"]
+        
+        if state == "submitted":
+            log_event(task_id, "📥 Task received and added to queue.")
 
-    elif event["kind"] == "artifact-update":
-        artifact = event["artifact"]
-        print(f"Artifact generated: {artifact['name']}")
+        elif state == "working":
+            log_event(task_id, "⚙️ Agent is currently processing...")
 
-    return {"status": "received"}
+        elif state == "awaiting_review":
+            # --- OUR UNIQUE STATE ---
+            meta = payload["status"].get("metadata", {})
+            reason = meta.get("reason", "Manual verification required")
+            log_event(task_id, f"⚠️ PAUSED: {reason}. Waiting for human approval.")
+            # Trigger external alert (Slack, SMS, etc.) here
+            
+        elif state == "completed":
+            log_event(task_id, "✅ SUCCESS: Task finished perfectly.")
+
+        elif state == "failed":
+            error_msg = payload["status"].get("message", "Unknown error")
+            log_event(task_id, f"❌ FAILED: {error_msg}")
+
+        elif state == "input_required":
+            log_event(task_id, "❓ Waiting for user to provide more information.")
+
+    # 3. Process Artifacts (The Results)
+    elif kind == "artifact-update":
+        artifact_name = payload["artifact"]["name"]
+        log_event(task_id, f"📦 NEW ARTIFACT: Generated file '{artifact_name}'")
+
+    return {"status": "event_processed"}
+
 
 if __name__ == "__main__":
     import uvicorn
